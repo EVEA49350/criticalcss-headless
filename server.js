@@ -61,9 +61,9 @@ function mergeRanges(ranges) {
 		return out;
 }
 
-// Healthcheck
+// Healthcheck (inclut SHA de build si injecté via Dockerfile)
 app.get("/health", (req, res) => {
-		res.status(200).json({ ok: true });
+		res.status(200).json({ ok: true, sha: process.env.APP_GIT_SHA || "unknown" });
 });
 
 // GET /critical-css?url=...&w=1366&h=768&token=...
@@ -113,7 +113,9 @@ app.get("/critical-css", async (req, res) => {
 
 				// IMPORTANT: DOM doit être activé avant CSS.enable sur certains Chromiums
 				await cdp.send("DOM.enable");
+				console.log("CDP: DOM.enable OK");
 				await cdp.send("CSS.enable");
+				console.log("CDP: CSS.enable OK");
 
 				// Démarre le tracking d'usage des règles
 				await cdp.send("CSS.startRuleUsageTracking");
