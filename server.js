@@ -111,40 +111,36 @@ app.get("/critical-css", async (req, res) => {
 				// CDP session
 				const cdp = await page.context().newCDPSession(page);
 
-				// IMPORTANT: DOM doit être activé avant CSS.enable sur certains Chromiums
+				// IMPORTANT: certains Chromiums exigent DOM.enable avant CSS.enable
 				await cdp.send("DOM.enable");
 				console.log("CDP: DOM.enable OK");
 				await cdp.send("CSS.enable");
 				console.log("CDP: CSS.enable OK");
 
-				// Démarre le tracking d'usage des règles
+				// Démarre le tracking d'usage des règles (renvoie ruleUsage avec styleSheetId et offsets)
 				await cdp.send("CSS.startRuleUsageTracking");
-
-				// Laisse le temps aux scripts de finaliser le rendu
 				await page.waitForTimeout(800);
 
 				const usage = await cdp.send("CSS.stopRuleUsageTracking");
-				const sheets = await cdp.send("CSS.getAllStyleSheets");
 
-				// Récupère le texte de toutes les stylesheets
-				const sheetIdToText = new Map();
-				for (const s of sheets.headers || []) {
-						try {
-								const t = await cdp.send("CSS.getStyleSheetText", {
-										styleSheetId: s.styleSheetId
-								});
-								sheetIdToText.set(s.styleSheetId, t.text || "");
-						} catch {
-								// ignore
-						}
-				}
-
-				// Ranges utilisés
+				// Regroupe les ranges utilisés par stylesheet, sans dépendre de CSS.getAllStyleSheets (non dispo sur certains CDP)
 				const bySheet = new Map();
 				for (const u of usage.ruleUsage || []) {
 						if (!u.used) continue;
 						if (!bySheet.has(u.styleSheetId)) bySheet.set(u.styleSheetId, []);
 						bySheet.get(u.styleSheetId).push([u.startOffset, u.endOffset]);
+				}
+
+				// Récupère le texte uniquement pour les stylesheets réellement utilisés
+				const sheetIdToText = new Map();
+				for (const sheetId of bySheet.keys()) {
+						try {
+								const t = await cdp.send("CSS.getStyleSheetText", { styleSheetId: sheetId });
+								sheetIdToText.set(sheetId, (t && t.text) ? t.text : "");
+						} catch (e) {
+								// Certains sheets peuvent être inaccessibles; on ignore
+								sheetIdToText.set(sheetId, "");
+						}
 				}
 
 				// Reconstruit le CSS critique
@@ -158,6 +154,13 @@ app.get("/critical-css", async (req, res) => {
 				}
 
 				critical = minifyCss(critical);
+
+				// Si critical vide, on renvoie 204 (utile pour debug)
+				if (!critical) {
+						res.setHeader("Cache-Control", "no-store");
+						return res.status(204).send("");
+				}
+
 				cacheSet(cacheKey, critical);
 
 				res.setHeader("Cache-Control", "public, max-age=600");
