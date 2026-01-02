@@ -11,7 +11,6 @@ const PORT = parseInt(process.env.PORT || "3000", 10);
 const API_TOKEN = process.env.CRITICALCSS_TOKEN || "";
 
 // Cache mémoire simple
-// Clé: sha256(url|w|h|ua)
 const CACHE = new Map();
 const CACHE_MAX_ITEMS = 200;
 const CACHE_TTL_MS = 1000 * 60 * 30; // 30 minutes
@@ -61,17 +60,49 @@ function mergeRanges(ranges) {
 		return out;
 }
 
-// Healthcheck (inclut SHA de build si injecté via Dockerfile)
+// Healthcheck
 app.get("/health", (req, res) => {
 		res.status(200).json({ ok: true, sha: process.env.APP_GIT_SHA || "unknown" });
 });
 
-// GET /critical-css?url=...&w=1366&h=768&token=...
+/**
+ * GET /critical-css
+ * Paramètres:
+ *   url      (obligatoire)  : page cible
+ *   w,h      (optionnel)    : viewport
+ *   ua       (optionnel)    : user-agent
+ *   token    (optionnel)    : sécurité
+ *   wait     (optionnel)    : sélecteurs CSS à attendre (CSV), ex: "header,#header,.elementor"
+ *   settle   (optionnel)    : ms additionnels après stabilisation (défaut 10000)
+ *   csswait  (optionnel)    : ms max pour attendre CSS appliqué (défaut 15000)
+ *
+ * Stratégie:
+ * - startRuleUsageTracking AVANT goto
+ * - goto domcontentloaded (plus tôt)
+ * - attendre load/networkidle (best-effort)
+ * - attendre que les stylesheets soient chargés ET appliqués (rel=stylesheet + media print hack)
+ * - attendre selectors business (header/hero/etc)
+ * - attendre fonts + 2 RAF
+ * - attendre settle (par défaut 10s)
+ * - stopRuleUsageTracking et extraction
+ */
 app.get("/critical-css", async (req, res) => {
 		const url = (req.query.url || "").toString();
 		const w = parseInt((req.query.w || "1366").toString(), 10);
 		const h = parseInt((req.query.h || "768").toString(), 10);
 		const token = (req.query.token || "").toString();
+		const ua = (req.query.ua || "").toString();
+
+		const waitRaw = (req.query.wait || "").toString().trim();
+		const waitSelectors = waitRaw
+				? waitRaw.split(",").map(s => s.trim()).filter(Boolean)
+				: [];
+
+		// settle par défaut = 10 secondes (votre demande)
+		const settleMs = Math.min(Math.max(parseInt((req.query.settle || "10000").toString(), 10) || 10000, 0), 60000);
+
+		// temps max pour attendre CSS "appliqué"
+		const cssWaitMs = Math.min(Math.max(parseInt((req.query.csswait || "15000").toString(), 10) || 15000, 1000), 60000);
 
 		if (!url || !/^https?:\/\//i.test(url)) {
 				return res.status(400).type("text/plain").send("Missing or invalid url");
@@ -84,8 +115,7 @@ app.get("/critical-css", async (req, res) => {
 		const width = Number.isFinite(w) ? Math.min(Math.max(w, 320), 2560) : 1366;
 		const height = Number.isFinite(h) ? Math.min(Math.max(h, 480), 2000) : 768;
 
-		const ua = (req.query.ua || "").toString();
-		const cacheKey = sha256(`${url}|${width}|${height}|${ua}`);
+		const cacheKey = sha256(`${url}|${width}|${height}|${ua}|${waitSelectors.join("|")}|${settleMs}|${cssWaitMs}`);
 
 		const cached = cacheGet(cacheKey);
 		if (cached) {
@@ -103,27 +133,61 @@ app.get("/critical-css", async (req, res) => {
 						userAgent: ua || undefined
 				});
 
+				await page.emulateMedia({ media: "screen" });
 				page.setDefaultTimeout(60000);
 
-				// Charge la page
-				await page.goto(url, { waitUntil: "networkidle" });
-
-				// CDP session
 				const cdp = await page.context().newCDPSession(page);
-
-				// IMPORTANT: certains Chromiums exigent DOM.enable avant CSS.enable
 				await cdp.send("DOM.enable");
-				console.log("CDP: DOM.enable OK");
 				await cdp.send("CSS.enable");
-				console.log("CDP: CSS.enable OK");
 
-				// Démarre le tracking d'usage des règles (renvoie ruleUsage avec styleSheetId et offsets)
+				// IMPORTANT: tracking AVANT navigation
 				await cdp.send("CSS.startRuleUsageTracking");
-				await page.waitForTimeout(800);
+
+				await page.goto(url, { waitUntil: "domcontentloaded" });
+
+				// Best-effort : load puis networkidle
+				await page.waitForLoadState("load").catch(() => {});
+				await page.waitForLoadState("networkidle").catch(() => {});
+
+				// 1) Attendre que les CSS soient chargés ET appliqués
+				// - tous les <link rel="stylesheet"> doivent avoir un .sheet
+				// - et plus aucun rel=stylesheet media="print" (votre hack preload/apply)
+				await page.waitForFunction(() => {
+						const links = Array.from(document.querySelectorAll('link[rel="stylesheet"]'));
+						// stylesheets chargés (sheet non null)
+						const allHaveSheet = links.every(l => !!l.sheet);
+
+						// hack media=print -> all
+						// tant qu'un stylesheet est encore en media=print, il n'est pas appliqué.
+						const anyPrint = links.some(l => (l.media || "").toLowerCase() === "print");
+
+						return allHaveSheet && !anyPrint;
+				}, { timeout: cssWaitMs }).catch(() => {});
+
+				// 2) Attentes explicites (header/hero/CE...) si fourni
+				for (const sel of waitSelectors) {
+						await page.waitForSelector(sel, { state: "attached", timeout: 12000 }).catch(() => {});
+				}
+
+				// 3) Attendre polices
+				await page.evaluate(async () => {
+						try {
+								if (document.fonts && document.fonts.ready) {
+										await document.fonts.ready;
+								}
+						} catch (e) {}
+				}).catch(() => {});
+
+				// 4) 2 frames pour stabiliser layout
+				await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))).catch(() => {});
+
+				// 5) Votre buffer demandé : 10s par défaut
+				if (settleMs > 0) {
+						await page.waitForTimeout(settleMs);
+				}
 
 				const usage = await cdp.send("CSS.stopRuleUsageTracking");
 
-				// Regroupe les ranges utilisés par stylesheet, sans dépendre de CSS.getAllStyleSheets (non dispo sur certains CDP)
 				const bySheet = new Map();
 				for (const u of usage.ruleUsage || []) {
 						if (!u.used) continue;
@@ -131,19 +195,16 @@ app.get("/critical-css", async (req, res) => {
 						bySheet.get(u.styleSheetId).push([u.startOffset, u.endOffset]);
 				}
 
-				// Récupère le texte uniquement pour les stylesheets réellement utilisés
 				const sheetIdToText = new Map();
 				for (const sheetId of bySheet.keys()) {
 						try {
 								const t = await cdp.send("CSS.getStyleSheetText", { styleSheetId: sheetId });
 								sheetIdToText.set(sheetId, (t && t.text) ? t.text : "");
 						} catch (e) {
-								// Certains sheets peuvent être inaccessibles; on ignore
 								sheetIdToText.set(sheetId, "");
 						}
 				}
 
-				// Reconstruit le CSS critique
 				let critical = "";
 				for (const [sheetId, ranges] of bySheet.entries()) {
 						const cssText = sheetIdToText.get(sheetId);
@@ -155,7 +216,6 @@ app.get("/critical-css", async (req, res) => {
 
 				critical = minifyCss(critical);
 
-				// Si critical vide, on renvoie 204 (utile pour debug)
 				if (!critical) {
 						res.setHeader("Cache-Control", "no-store");
 						return res.status(204).send("");
