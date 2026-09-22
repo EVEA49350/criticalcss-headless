@@ -9,6 +9,8 @@
 
     <application
         android:allowBackup="false"
+        android:icon="@drawable/evea_logo"
+        android:roundIcon="@drawable/evea_logo"
         android:label="EVEA BMS Terminal"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
