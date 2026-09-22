@@ -5,10 +5,6 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.bluetooth.*;
 import android.bluetooth.le.*;
-import android.content.BroadcastReceiver;
-import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.os.*;
@@ -30,7 +26,6 @@ public class MainActivity extends Activity {
     private BluetoothLeScanner scanner;
     private BluetoothGatt gatt;
     private BluetoothGattCharacteristic writeChar;
-    private BluetoothDevice pendingDevice;
     private BluetoothDevice currentDevice;
 
     private TextView status, terminal;
@@ -45,12 +40,12 @@ public class MainActivity extends Activity {
     private boolean connected=false;
     private boolean sessionReady=false;
     private boolean scanning=false;
-    private boolean bondReceiverRegistered=false;
     private boolean writeInProgress=false;
     private boolean closeAfterBd=false;
     private int reconnectAttempt=0;
 
     private final Handler handler=new Handler(Looper.getMainLooper());
+    private final StringBuilder rxBuffer=new StringBuilder();
 
     private static class WriteRequest {
         final String command;
@@ -79,43 +74,10 @@ public class MainActivity extends Activity {
         }
     };
 
-    private final BroadcastReceiver bondReceiver=new BroadcastReceiver(){
-        @Override public void onReceive(Context context,Intent intent){
-            if(!BluetoothDevice.ACTION_BOND_STATE_CHANGED.equals(intent.getAction())) return;
-            BluetoothDevice d=intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
-            if(d==null || pendingDevice==null || !d.getAddress().equals(pendingDevice.getAddress())) return;
-
-            int state=intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE,BluetoothDevice.ERROR);
-            int previous=intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE,BluetoothDevice.ERROR);
-
-            if(state==BluetoothDevice.BOND_BONDING){
-                runOnUiThread(()->setStatus("Association Bluetooth…",true));
-            }else if(state==BluetoothDevice.BOND_BONDED){
-                BluetoothDevice target=pendingDevice;
-                pendingDevice=null;
-                runOnUiThread(()->{
-                    append("[APP] Association Bluetooth terminée\n");
-                    setStatus("Association OK — connexion…",true);
-                    handler.postDelayed(()->connectGattNow(target),500);
-                });
-            }else if(state==BluetoothDevice.BOND_NONE && previous==BluetoothDevice.BOND_BONDING){
-                pendingDevice=null;
-                runOnUiThread(()->{
-                    setStatus("Association Bluetooth annulée ou échouée",false);
-                    append("[APP] Association Bluetooth échouée\n");
-                });
-            }
-        }
-    };
-
     @Override public void onCreate(Bundle b){
         super.onCreate(b);
         buildUi();
 
-        IntentFilter bondFilter=new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
-        if(Build.VERSION.SDK_INT>=33) registerReceiver(bondReceiver,bondFilter,Context.RECEIVER_NOT_EXPORTED);
-        else registerReceiver(bondReceiver,bondFilter);
-        bondReceiverRegistered=true;
 
         BluetoothManager m=(BluetoothManager)getSystemService(BLUETOOTH_SERVICE);
         adapter=m==null?null:m.getAdapter();
@@ -198,7 +160,7 @@ public class MainActivity extends Activity {
         if(!scanning)return;
         scanning=false;scanBtn.setText("SCAN");
         try{if(scanner!=null && perms())scanner.stopScan(scanCb);}catch(Exception ignored){}
-        if(!connected && pendingDevice==null)setStatus(rows.isEmpty()?"Aucun périphérique trouvé":"Sélectionne le BMS",true);
+        if(!connected)setStatus(rows.isEmpty()?"Aucun périphérique trouvé":"Sélectionne le BMS",true);
     }
 
     private final ScanCallback scanCb=new ScanCallback(){
@@ -227,33 +189,18 @@ public class MainActivity extends Activity {
     private void beginConnection(BluetoothDevice d){
         stopKeepAlive();
         closeGattNow(false);
-        pendingDevice=d;
         currentDevice=d;
         reconnectAttempt=0;
+        rxBuffer.setLength(0);
         append("\n[APP] Préparation de la connexion…\n");
+        setStatus("Connexion…",true);
 
-        try{
-            int bondState=d.getBondState();
-            if(bondState==BluetoothDevice.BOND_BONDED){
-                pendingDevice=null;
-                setStatus("Déjà associé — connexion…",true);
-                handler.postDelayed(()->connectGattNow(d),250);
-            }else if(bondState==BluetoothDevice.BOND_BONDING){
-                setStatus("Association Bluetooth en cours…",true);
-            }else{
-                setStatus("Association Bluetooth…",true);
-                append("[APP] Demande d'association Bluetooth\n");
-                if(!d.createBond()){
-                    append("[APP] Association explicite indisponible — connexion directe\n");
-                    pendingDevice=null;
-                    connectGattNow(d);
-                }
-            }
-        }catch(Exception e){
-            pendingDevice=null;
-            append("[APP] Impossible de lancer l'association — connexion directe\n");
-            connectGattNow(d);
-        }
+        /*
+         * Pas de createBond() explicite.
+         * On ouvre directement le GATT.
+         * Si une association est réellement nécessaire, Android la gère lui-même.
+         */
+        handler.postDelayed(()->connectGattNow(d),250);
     }
 
     private void connectGattNow(BluetoothDevice d){
@@ -376,7 +323,114 @@ public class MainActivity extends Activity {
         @Override public void onCharacteristicChanged(BluetoothGatt g,BluetoothGattCharacteristic c,byte[] v){if(v!=null)rx(v);}
     };
 
-    private void rx(byte[] v){final String s=new String(v,StandardCharsets.UTF_8);runOnUiThread(()->append(s));}
+    private void rx(byte[] v){
+        final String s=new String(v,StandardCharsets.UTF_8);
+        runOnUiThread(()->processRx(s));
+    }
+
+    private void processRx(String s_rxChunk){
+        rxBuffer.append(s_rxChunk);
+
+        int i_lineEnd;
+        while((i_lineEnd=rxBuffer.indexOf("\n"))>=0){
+            String s_line=rxBuffer.substring(0,i_lineEnd).replace("\r","").trim();
+            rxBuffer.delete(0,i_lineEnd+1);
+            if(!s_line.isEmpty()) processProtocolLine(s_line);
+        }
+
+        /*
+         * Sécurité si un flux sans fin de ligne arrive sans '\n'.
+         */
+        if(rxBuffer.length()>512){
+            append("[BLE] Trame incomplète abandonnée\n");
+            rxBuffer.setLength(0);
+        }
+    }
+
+    private void processProtocolLine(String s_line){
+        String[] as_fields=s_line.split(",",-1);
+        String s_type=as_fields[0];
+
+        try{
+            switch(s_type){
+                case "D1":
+                    if(as_fields.length!=4) throw new IllegalArgumentException();
+                    append(String.format(Locale.FRANCE,"[D1] Etat Master : %d | Warning : %d | SOC : %d %%\n",
+                        Integer.parseInt(as_fields[1]),Integer.parseInt(as_fields[2]),Integer.parseInt(as_fields[3])));
+                    return;
+
+                case "D2":
+                    if(as_fields.length!=8) throw new IllegalArgumentException();
+                    int i_bal=Integer.parseInt(as_fields[4]);
+                    append(String.format(Locale.FRANCE,"Cellule %02d | Cell : %d | Temp : %d | Bal : %s | Target : %d | Delay : %d ms | Error : %d %%\n",
+                        Integer.parseInt(as_fields[1]),Integer.parseInt(as_fields[2]),Integer.parseInt(as_fields[3]),
+                        i_bal==0?"OFF":Integer.toString(i_bal),Integer.parseInt(as_fields[5]),Long.parseLong(as_fields[6]),Integer.parseInt(as_fields[7])));
+                    return;
+
+                case "D3A":
+                    if(as_fields.length!=5) throw new IllegalArgumentException();
+                    append(String.format(Locale.FRANCE,"[D3] Target balance : %d | Cells in balance : %d | Cells need balance : %d | Courant charge : %.1f %%\n",
+                        Integer.parseInt(as_fields[1]),Integer.parseInt(as_fields[2]),Integer.parseInt(as_fields[3]),Integer.parseInt(as_fields[4])/10.0));
+                    return;
+
+                case "D3B":
+                    if(as_fields.length!=5) throw new IllegalArgumentException();
+                    append(String.format(Locale.FRANCE,"[D3] Cell min : ID %d / %d | Cell max : ID %d / %d\n",
+                        Integer.parseInt(as_fields[1]),Integer.parseInt(as_fields[2]),Integer.parseInt(as_fields[3]),Integer.parseInt(as_fields[4])));
+                    return;
+
+                case "D3C":
+                    if(as_fields.length!=6) throw new IllegalArgumentException();
+                    append(String.format(Locale.FRANCE,"[D3] Temp min : ID %d / %d | Temp moy : %d | Temp max : ID %d / %d\n",
+                        Integer.parseInt(as_fields[1]),Integer.parseInt(as_fields[2]),Integer.parseInt(as_fields[3]),Integer.parseInt(as_fields[4]),Integer.parseInt(as_fields[5])));
+                    return;
+
+                case "D4":
+                    if(as_fields.length==2 && "0".equals(as_fields[1])){
+                        append("[D4] Logbook vide\n");
+                        return;
+                    }
+                    if(as_fields.length!=6) throw new IllegalArgumentException();
+                    append(String.format(Locale.FRANCE,"[D4] Log %d | Temps : %d s | Device : %d | Repeat : %d | Error : %d\n",
+                        Integer.parseInt(as_fields[1]),Long.parseLong(as_fields[2]),Integer.parseInt(as_fields[3]),Integer.parseInt(as_fields[4]),Integer.parseInt(as_fields[5])));
+                    return;
+
+                case "D5A":
+                    if(as_fields.length!=5) throw new IllegalArgumentException();
+                    append(String.format(Locale.FRANCE,"[D5] WK_BUS : %s | WK_CHRG : %s | DEBUG_BLE : %s | ZIVAN : %s\n",
+                        "1".equals(as_fields[1])?"ON":"OFF","1".equals(as_fields[2])?"ON":"OFF","1".equals(as_fields[3])?"ON":"OFF","1".equals(as_fields[4])?"ON":"OFF"));
+                    return;
+
+                case "D5B":
+                    if(as_fields.length!=7) throw new IllegalArgumentException();
+                    append(String.format(Locale.FRANCE,"[D5] Zero A : %d ADC | Zero B : %d ADC | VPACK : %.2f V | VBUS : %.2f V | VISO : %.2f V | Courant : %d A\n",
+                        Long.parseLong(as_fields[1]),Long.parseLong(as_fields[2]),Integer.parseInt(as_fields[3])/100.0,Integer.parseInt(as_fields[4])/100.0,
+                        Integer.parseInt(as_fields[5])/100.0,Integer.parseInt(as_fields[6])));
+                    return;
+
+                case "D6":
+                    append("[D6] Non supporté sur Bluetooth\n");
+                    return;
+
+                case "D7A":
+                    if(as_fields.length!=5) throw new IllegalArgumentException();
+                    append(String.format(Locale.FRANCE,"[D7] Charge max : %.1f %% | Traction max : %d A | Regen max : %d A | Balancing : %.2f V\n",
+                        Integer.parseInt(as_fields[1])/10.0,Integer.parseInt(as_fields[2]),Integer.parseInt(as_fields[3]),Integer.parseInt(as_fields[4])/100.0));
+                    return;
+
+                case "D7B":
+                    if(as_fields.length!=4) throw new IllegalArgumentException();
+                    append(String.format(Locale.FRANCE,"[D7] SOC OCV : %d %% | SOC Coulomb : %d %% | Energie : %.3f Ah\n",
+                        Integer.parseInt(as_fields[1]),Integer.parseInt(as_fields[2]),Long.parseLong(as_fields[3])/1000.0));
+                    return;
+
+                default:
+                    append(s_line+"\n");
+            }
+        }catch(Exception e){
+            append("[BLE] Paquet invalide : "+s_line+"\n");
+        }
+    }
 
     private void startKeepAlive(){
         handler.removeCallbacks(keepAliveTask);
@@ -505,7 +559,6 @@ public class MainActivity extends Activity {
         handler.removeCallbacksAndMessages(null);
         stopScan();
         closeGattNow(false);
-        if(bondReceiverRegistered){try{unregisterReceiver(bondReceiver);}catch(Exception ignored){}bondReceiverRegistered=false;}
         super.onDestroy();
     }
 }
