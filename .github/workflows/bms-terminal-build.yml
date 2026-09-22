@@ -31,8 +31,8 @@ jobs:
       - name: Generate EVEA launcher icon
         run: |
           mkdir -p app/src/main/res/drawable-nodpi
-          cat icon_base64/part00.txt icon_base64/part01.txt icon_base64/part02.txt icon_base64/part03.txt | base64 --decode > app/src/main/res/drawable-nodpi/evea_logo.png
-          file app/src/main/res/drawable-nodpi/evea_logo.png
+          cat icon_base64_jpg/part00.txt icon_base64_jpg/part01.txt icon_base64_jpg/part02.txt icon_base64_jpg/part03.txt icon_base64_jpg/part04.txt icon_base64_jpg/part05.txt | base64 --decode > app/src/main/res/drawable-nodpi/evea_logo.jpg
+          file app/src/main/res/drawable-nodpi/evea_logo.jpg
 
       - name: Build debug APK
         run: gradle assembleDebug
