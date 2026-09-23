@@ -88,50 +88,147 @@ public class MainActivity extends Activity {
     private int dp(int v){return Math.round(v*getResources().getDisplayMetrics().density);}
     private Button button(String t){Button b=new Button(this);b.setText(t);b.setAllCaps(false);return b;}
 
+    private LinearLayout connectionPanel;
+    private LinearLayout debugPanel;
+    private TextView debugTitle;
+    private int activeScreen=0; // 0 = Connexion, 1..7 = Debug correspondant
+
     private void buildUi(){
-        LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setPadding(dp(10),dp(10),dp(10),dp(10));
+        LinearLayout root=new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(10),dp(10),dp(10),dp(10));
 
-        TextView title=new TextView(this);title.setText("EVEA BMS Terminal");title.setTextSize(22);title.setTextColor(Color.BLACK);root.addView(title);
+        LinearLayout header=new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
 
-        status=new TextView(this);status.setText("Initialisation…");status.setPadding(0,dp(4),0,dp(8));root.addView(status);
+        TextView title=new TextView(this);
+        title.setText("EVEA BMS Terminal");
+        title.setTextSize(22);
+        title.setTextColor(Color.BLACK);
+        header.addView(title,new LinearLayout.LayoutParams(0,dp(52),1));
 
+        Button menuButton=button("☰");
+        menuButton.setTextSize(25);
+        menuButton.setContentDescription("Choisir une page");
+        menuButton.setOnClickListener(v->showNavigationMenu(menuButton));
+        header.addView(menuButton,new LinearLayout.LayoutParams(dp(60),dp(52)));
+        root.addView(header);
+
+        status=new TextView(this);
+        status.setText("Initialisation…");
+        status.setPadding(0,dp(4),0,dp(8));
+        root.addView(status);
+
+        connectionPanel=new LinearLayout(this);
+        connectionPanel.setOrientation(LinearLayout.VERTICAL);
         LinearLayout top=new LinearLayout(this);
-        scanBtn=button("SCAN");scanBtn.setOnClickListener(v->requestOrScan());
-        disconnectBtn=button("DÉCONNECTER");disconnectBtn.setEnabled(false);disconnectBtn.setOnClickListener(v->disconnectGracefully());
-        Button clear=button("EFFACER");clear.setOnClickListener(v->terminal.setText(""));
+        scanBtn=button("SCAN");
+        scanBtn.setOnClickListener(v->requestOrScan());
+        disconnectBtn=button("DÉCONNECTER");
+        disconnectBtn.setEnabled(false);
+        disconnectBtn.setOnClickListener(v->disconnectGracefully());
+        Button clear=button("EFFACER");
+        clear.setOnClickListener(v->{terminal.setText("");rxBuffer.setLength(0);});
         top.addView(scanBtn,new LinearLayout.LayoutParams(0,dp(48),1));
         top.addView(disconnectBtn,new LinearLayout.LayoutParams(0,dp(48),1.4f));
         top.addView(clear,new LinearLayout.LayoutParams(0,dp(48),1));
-        root.addView(top);
+        connectionPanel.addView(top);
 
         listAdapter=new ArrayAdapter<>(this,android.R.layout.simple_list_item_1,rows);
-        ListView list=new ListView(this);list.setAdapter(listAdapter);
+        ListView list=new ListView(this);
+        list.setAdapter(listAdapter);
         list.setOnItemClickListener((p,v,pos,id)->{stopScan();beginConnection(found.get(pos));});
-        root.addView(list,new LinearLayout.LayoutParams(-1,dp(150)));
+        connectionPanel.addView(list,new LinearLayout.LayoutParams(-1,0,1));
+        root.addView(connectionPanel,new LinearLayout.LayoutParams(-1,0,1));
 
-        TextView lab=new TextView(this);lab.setText("Terminal BMS");lab.setTextSize(15);lab.setPadding(0,dp(6),0,dp(4));root.addView(lab);
+        debugPanel=new LinearLayout(this);
+        debugPanel.setOrientation(LinearLayout.VERTICAL);
+        debugPanel.setVisibility(View.GONE);
 
-        terminal=new TextView(this);terminal.setTypeface(android.graphics.Typeface.MONOSPACE);terminal.setTextSize(13);
-        terminal.setTextColor(Color.rgb(225,240,225));terminal.setBackgroundColor(Color.rgb(20,24,20));terminal.setPadding(dp(8),dp(8),dp(8),dp(8));terminal.setTextIsSelectable(true);
-        terminalScroll=new ScrollView(this);terminalScroll.addView(terminal);
-        root.addView(terminalScroll,new LinearLayout.LayoutParams(-1,0,1));
+        debugTitle=new TextView(this);
+        debugTitle.setTextSize(17);
+        debugTitle.setPadding(0,dp(4),0,dp(8));
+        debugPanel.addView(debugTitle);
 
-        GridLayout grid=new GridLayout(this);grid.setColumnCount(4);grid.setUseDefaultMargins(true);
-        for(String c:new String[]{"D0","D1","D2","D3","D4","D5","D6","D7","LB","++","H?","RT"}){
+        terminal=new TextView(this);
+        terminal.setTypeface(android.graphics.Typeface.MONOSPACE);
+        terminal.setTextSize(13);
+        terminal.setTextColor(Color.rgb(225,240,225));
+        terminal.setBackgroundColor(Color.rgb(20,24,20));
+        terminal.setPadding(dp(8),dp(8),dp(8),dp(8));
+        terminal.setTextIsSelectable(true);
+        terminalScroll=new ScrollView(this);
+        terminalScroll.addView(terminal);
+        debugPanel.addView(terminalScroll,new LinearLayout.LayoutParams(-1,0,1));
+
+        GridLayout grid=new GridLayout(this);
+        grid.setColumnCount(4);
+        grid.setUseDefaultMargins(true);
+        for(String c:new String[]{"LB","++","H?","RT"}){
             Button b=button(c);
-            if(c.equals("RT")) b.setOnClickListener(v->new AlertDialog.Builder(this).setTitle("Reset du BMS").setMessage("Envoyer RT au Master ?").setNegativeButton("Annuler",null).setPositiveButton("RESET",(d,w)->send("RT")).show());
+            if(c.equals("RT")) b.setOnClickListener(v->new AlertDialog.Builder(this)
+                .setTitle("Reset du BMS")
+                .setMessage("Envoyer RT au Master ?")
+                .setNegativeButton("Annuler",null)
+                .setPositiveButton("RESET",(d,w)->send("RT"))
+                .show());
             else b.setOnClickListener(v->send(c));
-            GridLayout.LayoutParams gp=new GridLayout.LayoutParams();gp.width=0;gp.height=dp(44);gp.columnSpec=GridLayout.spec(GridLayout.UNDEFINED,1f);b.setLayoutParams(gp);grid.addView(b);
+            GridLayout.LayoutParams gp=new GridLayout.LayoutParams();
+            gp.width=0;
+            gp.height=dp(44);
+            gp.columnSpec=GridLayout.spec(GridLayout.UNDEFINED,1f);
+            b.setLayoutParams(gp);
+            grid.addView(b);
         }
-        root.addView(grid);
+        debugPanel.addView(grid);
 
         LinearLayout bottom=new LinearLayout(this);
-        command=new EditText(this);command.setHint("Commande");command.setSingleLine(true);
-        Button send=button("ENVOYER");send.setOnClickListener(v->{String s=command.getText().toString().trim();if(!s.isEmpty()){send(s);command.setText("");}});
+        command=new EditText(this);
+        command.setHint("Commande");
+        command.setSingleLine(true);
+        Button sendButton=button("ENVOYER");
+        sendButton.setOnClickListener(v->{
+            String s=command.getText().toString().trim();
+            if(!s.isEmpty()){send(s);command.setText("");}
+        });
         bottom.addView(command,new LinearLayout.LayoutParams(0,dp(50),1));
-        bottom.addView(send,new LinearLayout.LayoutParams(dp(110),dp(50)));
-        root.addView(bottom);
+        bottom.addView(sendButton,new LinearLayout.LayoutParams(dp(110),dp(50)));
+        debugPanel.addView(bottom);
+        root.addView(debugPanel,new LinearLayout.LayoutParams(-1,0,1));
+
         setContentView(root);
+    }
+
+    private void showNavigationMenu(View anchor){
+        PopupMenu menu=new PopupMenu(this,anchor);
+        menu.getMenu().add(0,0,0,"Connexion");
+        for(int i=1;i<=7;i++)menu.getMenu().add(0,i,i,"Debug "+i);
+        menu.setOnMenuItemClickListener(item->{selectScreen(item.getItemId());return true;});
+        menu.show();
+    }
+
+    private void selectScreen(int screen){
+        if(screen==activeScreen)return;
+
+        // Chaque changement de page repart avec un terminal et une trame RX vides.
+        terminal.setText("");
+        rxBuffer.setLength(0);
+        activeScreen=screen;
+
+        boolean connectionScreen=(screen==0);
+        connectionPanel.setVisibility(connectionScreen?View.VISIBLE:View.GONE);
+        debugPanel.setVisibility(connectionScreen?View.GONE:View.VISIBLE);
+
+        if(connectionScreen){
+            // L'affichage Connexion ne doit pas maintenir le debug actif.
+            if(sessionReady)enqueueCommandOnMain("D0",false,false);
+        }else{
+            debugTitle.setText("Debug "+screen);
+            // La commande choisie dans le menu remplace les anciens boutons D1-D7.
+            if(sessionReady)enqueueCommandOnMain("D"+screen,false,false);
+            else Toast.makeText(this,"Connecte d'abord le BMS depuis Connexion",Toast.LENGTH_SHORT).show();
+        }
     }
 
     private boolean perms(){
