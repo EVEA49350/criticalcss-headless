@@ -43,6 +43,7 @@ public class MainActivity extends Activity {
     private boolean writeInProgress=false;
     private boolean closeAfterBd=false;
     private int reconnectAttempt=0;
+    private boolean authFailure=false;
 
     private final Handler handler=new Handler(Looper.getMainLooper());
     private final StringBuilder rxBuffer=new StringBuilder();
@@ -295,6 +296,8 @@ public class MainActivity extends Activity {
         reconnectAttempt=0;
         rxBuffer.setLength(0);
         append("\n[APP] Préparation de la connexion…\n");
+        authFailure=false;
+        trace("Connexion demandée : bond = "+bondState(d));
         setStatus("Connexion…",true);
 
         /*
@@ -313,6 +316,7 @@ public class MainActivity extends Activity {
         writeChar=null;
         setStatus(reconnectAttempt>0?"Reconnexion…":"Connexion…",true);
         append(reconnectAttempt>0?"[APP] Nouvelle tentative de connexion GATT…\n":"[APP] Connexion GATT…\n");
+        trace("connectGatt, tentative "+(reconnectAttempt+1)+", bond = "+bondState(d));
         try{
             gatt=d.connectGatt(this,false,gattCb,BluetoothDevice.TRANSPORT_LE);
             if(gatt==null)setStatus("Connexion impossible",false);
@@ -327,6 +331,7 @@ public class MainActivity extends Activity {
     private final BluetoothGattCallback gattCb=new BluetoothGattCallback(){
         @Override public void onConnectionStateChange(BluetoothGatt g,int st,int ns){
             if(g!=gatt){try{g.close();}catch(Exception ignored){}return;}
+            traceOnMain("GATT : état="+ns+", statut="+st+", bond="+bondState(currentDevice));
 
             if(ns==BluetoothProfile.STATE_CONNECTED && st==BluetoothGatt.GATT_SUCCESS){
                 connected=true;
@@ -354,7 +359,8 @@ public class MainActivity extends Activity {
                 currentWrite=null;
 
                 BluetoothDevice retryDevice=currentDevice;
-                boolean retry=!manualDisconnect && retryDevice!=null && reconnectAttempt<1;
+                // Éviter une seconde association automatique pendant un échec de sécurité.
+                boolean retry=!manualDisconnect && !authFailure && st!=5 && st!=15 && retryDevice!=null && reconnectAttempt<1 && bondState(retryDevice).equals("NONE");
 
                 try{g.close();}catch(Exception ignored){}
                 if(g==gatt)gatt=null;
@@ -378,6 +384,7 @@ public class MainActivity extends Activity {
 
         @Override public void onServicesDiscovered(BluetoothGatt g,int st){
             if(g!=gatt)return;
+            traceOnMain("Découverte services : statut="+st+", bond="+bondState(currentDevice));
             if(st!=BluetoothGatt.GATT_SUCCESS){runOnUiThread(()->setStatus("Erreur découverte services : "+st,false));return;}
 
             BluetoothGattService s=g.getService(SVC);
@@ -389,12 +396,14 @@ public class MainActivity extends Activity {
             writeChar=((c1.getProperties()&(BluetoothGattCharacteristic.PROPERTY_WRITE|BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE))!=0)?c1:c2;
             if(writeChar==null){runOnUiThread(()->setStatus("Caractéristique d'écriture introuvable",false));return;}
 
+            traceOnMain("FFE1 propriétés="+c1.getProperties()+", FFE2 propriétés="+(c2==null?"absente":c2.getProperties())+", bond="+bondState(currentDevice));
             try{
                 if(!g.setCharacteristicNotification(c1,true)){runOnUiThread(()->setStatus("Activation notifications refusée",false));return;}
                 BluetoothGattDescriptor d=c1.getDescriptor(CCCD);
                 if(d==null){runOnUiThread(()->setStatus("CCCD 0x2902 introuvable",false));return;}
                 d.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
-                if(!g.writeDescriptor(d))runOnUiThread(()->setStatus("Échec écriture CCCD",false));
+                traceOnMain("Écriture CCCD FFE1 ; bond="+bondState(currentDevice));
+                if(!g.writeDescriptor(d))runOnUiThread(()->{trace("writeDescriptor a retourné false");setStatus("Échec écriture CCCD",false);});
             }catch(Exception e){
                 runOnUiThread(()->setStatus("Erreur activation notifications",false));
             }
@@ -403,6 +412,7 @@ public class MainActivity extends Activity {
         @Override public void onDescriptorWrite(BluetoothGatt g,BluetoothGattDescriptor d,int st){
             if(g!=gatt)return;
             runOnUiThread(()->{
+                trace("Réponse CCCD : statut="+st+", bond="+bondState(currentDevice));
                 if(st==BluetoothGatt.GATT_SUCCESS){
                     sessionReady=true;
                     reconnectAttempt=0;
@@ -411,6 +421,7 @@ public class MainActivity extends Activity {
                     enqueueCommandOnMain("BC",false,true);
                     startKeepAlive();
                 }else{
+                    if(st==5 || st==15){authFailure=true;trace("Erreur de sécurité GATT : association répétée potentielle");}
                     setStatus("Erreur notifications : "+st,false);
                 }
             });
@@ -418,6 +429,7 @@ public class MainActivity extends Activity {
 
         @Override public void onCharacteristicWrite(BluetoothGatt g,BluetoothGattCharacteristic c,int st){
             if(g!=gatt)return;
+            if(st!=BluetoothGatt.GATT_SUCCESS)traceOnMain("Écriture BLE échouée : statut="+st+", bond="+bondState(currentDevice));
             runOnUiThread(()->finishCurrentWrite(st));
         }
 
