@@ -85,152 +85,157 @@ public class MainActivity extends Activity {
         requestOrScan();
     }
 
+
+    private static final int BACKGROUND=Color.rgb(13,16,19), PANEL=Color.rgb(24,29,34), BORDER=Color.rgb(61,70,77);
+    private static final int FOREGROUND=Color.WHITE, MUTED=Color.rgb(170,184,194), GREEN=Color.rgb(74,196,120);
+    private LinearLayout connectionPanel,debugPanel;
+    private TextView screenTitle,connectionLog;
+    private final StringBuilder diagnostics=new StringBuilder();
+    private int activeScreen=0;
     private int dp(int v){return Math.round(v*getResources().getDisplayMetrics().density);}
-    private Button button(String t){Button b=new Button(this);b.setText(t);b.setAllCaps(false);return b;}
-
-    private LinearLayout connectionPanel;
-    private LinearLayout debugPanel;
-    private TextView debugTitle;
-    private int activeScreen=0; // 0 = Connexion, 1..7 = Debug correspondant
-
+    private android.graphics.drawable.GradientDrawable background(int fill,int stroke,int radius){
+        android.graphics.drawable.GradientDrawable d=new android.graphics.drawable.GradientDrawable();
+        d.setColor(fill);d.setCornerRadius(dp(radius));if(stroke!=0)d.setStroke(dp(1),stroke);return d;
+    }
+    private Button button(String label){
+        Button b=new Button(this);b.setText(label);b.setAllCaps(false);b.setTextColor(FOREGROUND);b.setTextSize(13);
+        b.setBackground(background(PANEL,BORDER,12));b.setPadding(dp(5),0,dp(5),0);return b;
+    }
+    private TextView text(String label,int size,int color){
+        TextView t=new TextView(this);t.setText(label);t.setTextSize(size);t.setTextColor(color);return t;
+    }
     private void buildUi(){
-        LinearLayout root=new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(10),dp(10),dp(10),dp(10));
+        getWindow().setStatusBarColor(BACKGROUND);getWindow().setNavigationBarColor(BACKGROUND);
+        LinearLayout root=new LinearLayout(this);root.setOrientation(1);root.setBackgroundColor(BACKGROUND);
+        root.setPadding(dp(14),dp(10),dp(14),dp(10));
+        LinearLayout header=new LinearLayout(this);header.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout headerText=new LinearLayout(this);headerText.setOrientation(1);
+        TextView title=text("EVEA BMS Terminal",21,FOREGROUND);title.setTypeface(null,1);headerText.addView(title);
+        status=text("Déconnecté",12,Color.rgb(240,130,130));status.setPadding(0,dp(5),0,0);
+        headerText.addView(status);header.addView(headerText,new LinearLayout.LayoutParams(0,dp(65),1));
+        Button menuBtn=button("☰");menuBtn.setTextSize(24);menuBtn.setContentDescription("Navigation");
+        menuBtn.setOnClickListener(v->showNavigationMenu());
+        header.addView(menuBtn,new LinearLayout.LayoutParams(dp(55),dp(50)));root.addView(header);
+        View line=new View(this);line.setBackgroundColor(BORDER);
+        LinearLayout.LayoutParams lineP=new LinearLayout.LayoutParams(-1,dp(1));lineP.setMargins(0,dp(3),0,dp(12));
+        root.addView(line,lineP);
+        screenTitle=text("Connexion",17,FOREGROUND);screenTitle.setTypeface(null,1);
+        screenTitle.setPadding(0,0,0,dp(12));root.addView(screenTitle);
 
-        LinearLayout header=new LinearLayout(this);
-        header.setOrientation(LinearLayout.HORIZONTAL);
-        header.setGravity(Gravity.CENTER_VERTICAL);
-
-        TextView title=new TextView(this);
-        title.setText("EVEA BMS Terminal");
-        title.setTextSize(22);
-        title.setTextColor(Color.BLACK);
-        header.addView(title,new LinearLayout.LayoutParams(0,dp(52),1));
-
-        Button menuButton=button("☰");
-        menuButton.setTextSize(25);
-        menuButton.setContentDescription("Choisir une page");
-        menuButton.setOnClickListener(v->showNavigationMenu(menuButton));
-        header.addView(menuButton,new LinearLayout.LayoutParams(dp(60),dp(52)));
-        root.addView(header);
-
-        status=new TextView(this);
-        status.setText("Initialisation…");
-        status.setPadding(0,dp(4),0,dp(8));
-        root.addView(status);
-
-        connectionPanel=new LinearLayout(this);
-        connectionPanel.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout top=new LinearLayout(this);
-        scanBtn=button("SCAN");
-        scanBtn.setOnClickListener(v->requestOrScan());
-        disconnectBtn=button("DÉCONNECTER");
-        disconnectBtn.setEnabled(false);
+        connectionPanel=new LinearLayout(this);connectionPanel.setOrientation(1);
+        LinearLayout bar=new LinearLayout(this);
+        scanBtn=button("SCAN");scanBtn.setOnClickListener(v->requestOrScan());
+        disconnectBtn=button("DÉCONNECTER");disconnectBtn.setEnabled(false);
         disconnectBtn.setOnClickListener(v->disconnectGracefully());
-        Button clear=button("EFFACER");
-        clear.setOnClickListener(v->{terminal.setText("");rxBuffer.setLength(0);});
-        top.addView(scanBtn,new LinearLayout.LayoutParams(0,dp(48),1));
-        top.addView(disconnectBtn,new LinearLayout.LayoutParams(0,dp(48),1.4f));
-        top.addView(clear,new LinearLayout.LayoutParams(0,dp(48),1));
-        connectionPanel.addView(top);
-
-        listAdapter=new ArrayAdapter<>(this,android.R.layout.simple_list_item_1,rows);
-        ListView list=new ListView(this);
-        list.setAdapter(listAdapter);
+        Button clear=button("EFFACER");clear.setOnClickListener(v->{
+            terminal.setText("");rxBuffer.setLength(0);diagnostics.setLength(0);connectionLog.setText("");
+        });
+        for(Button b:new Button[]{scanBtn,disconnectBtn,clear}){
+            LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,dp(47),b==disconnectBtn?1.5f:1);
+            p.rightMargin=dp(5);bar.addView(b,p);
+        }
+        connectionPanel.addView(bar);
+        listAdapter=new ArrayAdapter<String>(this,android.R.layout.simple_list_item_1,rows){
+            @Override public View getView(int position,View reuse,android.view.ViewGroup parent){
+                TextView v=(TextView)super.getView(position,reuse,parent);
+                v.setTextColor(FOREGROUND);v.setTextSize(14);v.setPadding(dp(12),dp(10),dp(12),dp(10));
+                v.setBackground(background(PANEL,BORDER,9));return v;
+            }
+        };
+        ListView list=new ListView(this);list.setAdapter(listAdapter);list.setDividerHeight(dp(6));
+        list.setBackgroundColor(BACKGROUND);
         list.setOnItemClickListener((p,v,pos,id)->{stopScan();beginConnection(found.get(pos));});
         connectionPanel.addView(list,new LinearLayout.LayoutParams(-1,0,1));
+        LinearLayout diagHead=new LinearLayout(this);diagHead.setGravity(Gravity.CENTER_VERTICAL);
+        diagHead.addView(text("Journal de connexion",14,MUTED),new LinearLayout.LayoutParams(0,dp(44),1));
+        Button copy=button("COPIER");copy.setOnClickListener(v->{
+            android.content.ClipboardManager clipboard=(android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+            if(clipboard!=null)clipboard.setPrimaryClip(android.content.ClipData.newPlainText("EVEA BLE",diagnostics.toString()));
+            Toast.makeText(this,"Journal copié",Toast.LENGTH_SHORT).show();
+        });
+        diagHead.addView(copy,new LinearLayout.LayoutParams(dp(90),dp(39)));connectionPanel.addView(diagHead);
+        connectionLog=text("",12,MUTED);connectionLog.setTypeface(android.graphics.Typeface.MONOSPACE);
+        connectionLog.setPadding(dp(8),dp(8),dp(8),dp(8));connectionLog.setBackground(background(PANEL,BORDER,9));
+        ScrollView diagScroll=new ScrollView(this);diagScroll.addView(connectionLog);
+        connectionPanel.addView(diagScroll,new LinearLayout.LayoutParams(-1,dp(165)));
         root.addView(connectionPanel,new LinearLayout.LayoutParams(-1,0,1));
 
-        debugPanel=new LinearLayout(this);
-        debugPanel.setOrientation(LinearLayout.VERTICAL);
-        debugPanel.setVisibility(View.GONE);
-
-        debugTitle=new TextView(this);
-        debugTitle.setTextSize(17);
-        debugTitle.setPadding(0,dp(4),0,dp(8));
-        debugPanel.addView(debugTitle);
-
-        terminal=new TextView(this);
-        terminal.setTypeface(android.graphics.Typeface.MONOSPACE);
-        terminal.setTextSize(13);
-        terminal.setTextColor(Color.rgb(225,240,225));
-        terminal.setBackgroundColor(Color.rgb(20,24,20));
-        terminal.setPadding(dp(8),dp(8),dp(8),dp(8));
-        terminal.setTextIsSelectable(true);
-        terminalScroll=new ScrollView(this);
-        terminalScroll.addView(terminal);
+        debugPanel=new LinearLayout(this);debugPanel.setOrientation(1);debugPanel.setVisibility(View.GONE);
+        terminal=text("",13,Color.rgb(226,240,226));terminal.setTypeface(android.graphics.Typeface.MONOSPACE);
+        terminal.setTextIsSelectable(true);terminal.setPadding(dp(9),dp(9),dp(9),dp(9));
+        terminal.setBackground(background(Color.rgb(19,26,22),BORDER,10));
+        terminalScroll=new ScrollView(this);terminalScroll.addView(terminal);
         debugPanel.addView(terminalScroll,new LinearLayout.LayoutParams(-1,0,1));
-
-        GridLayout grid=new GridLayout(this);
-        grid.setColumnCount(4);
-        grid.setUseDefaultMargins(true);
+        LinearLayout actions=new LinearLayout(this);
         for(String c:new String[]{"LB","++","H?","RT"}){
-            Button b=button(c);
-            if(c.equals("RT")) b.setOnClickListener(v->new AlertDialog.Builder(this)
-                .setTitle("Reset du BMS")
-                .setMessage("Envoyer RT au Master ?")
-                .setNegativeButton("Annuler",null)
-                .setPositiveButton("RESET",(d,w)->send("RT"))
-                .show());
+            Button b=button(c);LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,dp(46),1);
+            p.setMargins(0,dp(8),dp(5),0);actions.addView(b,p);
+            if(c.equals("RT"))b.setOnClickListener(v->new AlertDialog.Builder(this)
+                .setTitle("Reset du BMS").setMessage("Envoyer RT au Master ?")
+                .setNegativeButton("Annuler",null).setPositiveButton("RESET",(d,w)->send("RT")).show());
             else b.setOnClickListener(v->send(c));
-            GridLayout.LayoutParams gp=new GridLayout.LayoutParams();
-            gp.width=0;
-            gp.height=dp(44);
-            gp.columnSpec=GridLayout.spec(GridLayout.UNDEFINED,1f);
-            b.setLayoutParams(gp);
-            grid.addView(b);
         }
-        debugPanel.addView(grid);
-
-        LinearLayout bottom=new LinearLayout(this);
-        command=new EditText(this);
-        command.setHint("Commande");
-        command.setSingleLine(true);
-        Button sendButton=button("ENVOYER");
-        sendButton.setOnClickListener(v->{
-            String s=command.getText().toString().trim();
-            if(!s.isEmpty()){send(s);command.setText("");}
+        debugPanel.addView(actions);
+        LinearLayout cmdBar=new LinearLayout(this);cmdBar.setGravity(Gravity.CENTER_VERTICAL);
+        command=new EditText(this);command.setHint("Commande");command.setSingleLine(true);
+        command.setTextColor(FOREGROUND);command.setHintTextColor(MUTED);
+        cmdBar.addView(command,new LinearLayout.LayoutParams(0,dp(50),1));
+        Button sendBtn=button("ENVOYER");sendBtn.setOnClickListener(v->{
+            String c=command.getText().toString().trim();if(!c.isEmpty()){send(c);command.setText("");}
         });
-        bottom.addView(command,new LinearLayout.LayoutParams(0,dp(50),1));
-        bottom.addView(sendButton,new LinearLayout.LayoutParams(dp(110),dp(50)));
-        debugPanel.addView(bottom);
-        root.addView(debugPanel,new LinearLayout.LayoutParams(-1,0,1));
-
-        setContentView(root);
+        cmdBar.addView(sendBtn,new LinearLayout.LayoutParams(dp(100),dp(45)));debugPanel.addView(cmdBar);
+        root.addView(debugPanel,new LinearLayout.LayoutParams(-1,0,1));setContentView(root);
     }
-
-    private void showNavigationMenu(View anchor){
-        PopupMenu menu=new PopupMenu(this,anchor);
-        menu.getMenu().add(0,0,0,"Connexion");
-        for(int i=1;i<=7;i++)menu.getMenu().add(0,i,i,"Debug "+i);
-        menu.setOnMenuItemClickListener(item->{selectScreen(item.getItemId());return true;});
-        menu.show();
+    private void showNavigationMenu(){
+        android.app.Dialog dialog=new android.app.Dialog(this);
+        LinearLayout outer=new LinearLayout(this);outer.setOrientation(1);
+        outer.setPadding(dp(10),dp(10),dp(10),dp(10));outer.setBackground(background(PANEL,BORDER,16));
+        TextView caption=text("NAVIGATION",12,MUTED);caption.setPadding(dp(12),dp(7),0,dp(12));outer.addView(caption);
+        ScrollView scroll=new ScrollView(this);LinearLayout entries=new LinearLayout(this);entries.setOrientation(1);
+        for(int i=0;i<=7;i++){
+            int destination=i;boolean selected=(i==activeScreen);
+            LinearLayout line=new LinearLayout(this);line.setGravity(Gravity.CENTER_VERTICAL);
+            line.setPadding(dp(12),0,dp(12),0);
+            line.setBackground(background(selected?Color.rgb(40,57,49):PANEL,selected?GREEN:BORDER,8));
+            TextView name=text(i==0?"⌁  Connexion":"▣  Debug "+i,16,FOREGROUND);
+            line.addView(name,new LinearLayout.LayoutParams(0,dp(54),1));
+            if(selected)line.addView(text("✓",21,GREEN));
+            LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,dp(54));lp.bottomMargin=dp(5);
+            entries.addView(line,lp);
+            line.setOnClickListener(v->{dialog.dismiss();selectScreen(destination);});
+        }
+        scroll.addView(entries);outer.addView(scroll);
+        dialog.setContentView(outer);dialog.show();
+        Window w=dialog.getWindow();
+        if(w!=null){w.setBackgroundDrawableResource(android.R.color.transparent);
+            w.setLayout(getResources().getDisplayMetrics().widthPixels-dp(32),-2);
+            w.setGravity(Gravity.TOP|Gravity.RIGHT);w.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            WindowManager.LayoutParams a=w.getAttributes();a.dimAmount=0.55f;w.setAttributes(a);
+        }
     }
-
     private void selectScreen(int screen){
         if(screen==activeScreen)return;
-
-        // Chaque changement de page repart avec un terminal et une trame RX vides.
-        terminal.setText("");
-        rxBuffer.setLength(0);
-        activeScreen=screen;
-
-        boolean connectionScreen=(screen==0);
-        connectionPanel.setVisibility(connectionScreen?View.VISIBLE:View.GONE);
-        debugPanel.setVisibility(connectionScreen?View.GONE:View.VISIBLE);
-
-        if(connectionScreen){
-            // L'affichage Connexion ne doit pas maintenir le debug actif.
-            if(sessionReady)enqueueCommandOnMain("D0",false,false);
-        }else{
-            debugTitle.setText("Debug "+screen);
-            // La commande choisie dans le menu remplace les anciens boutons D1-D7.
-            if(sessionReady)enqueueCommandOnMain("D"+screen,false,false);
-            else Toast.makeText(this,"Connecte d'abord le BMS depuis Connexion",Toast.LENGTH_SHORT).show();
-        }
+        terminal.setText("");rxBuffer.setLength(0);activeScreen=screen;
+        boolean connection=screen==0;screenTitle.setText(connection?"Connexion":"Debug "+screen);
+        connectionPanel.setVisibility(connection?View.VISIBLE:View.GONE);
+        debugPanel.setVisibility(connection?View.GONE:View.VISIBLE);
+        if(connection){if(sessionReady)enqueueCommandOnMain("D0",false,false);}
+        else if(sessionReady)enqueueCommandOnMain("D"+screen,false,false);
+        else Toast.makeText(this,"Connecte d'abord le BMS depuis Connexion",Toast.LENGTH_SHORT).show();
+        if(screen==6)append("[D6] Non supporté sur Bluetooth\n");
     }
-
+    private void trace(String event){
+        String record=String.format(Locale.ROOT,"%1$tT  %2$s\n",new Date(),event);
+        diagnostics.append(record);if(diagnostics.length()>12000)diagnostics.delete(0,diagnostics.length()-9000);
+        if(connectionLog!=null)connectionLog.setText(diagnostics.toString());
+    }
+    private void traceOnMain(String event){runOnUiThread(()->trace(event));}
+    private String bondState(BluetoothDevice d){
+        if(d==null)return "null";
+        try{int state=d.getBondState();
+            return state==BluetoothDevice.BOND_BONDED?"BONDED":state==BluetoothDevice.BOND_BONDING?"BONDING":"NONE";
+        }catch(Exception ex){return "indisponible";}
+    }
     private boolean perms(){
         if(Build.VERSION.SDK_INT>=31) return checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)==PackageManager.PERMISSION_GRANTED && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)==PackageManager.PERMISSION_GRANTED;
         return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)==PackageManager.PERMISSION_GRANTED;
