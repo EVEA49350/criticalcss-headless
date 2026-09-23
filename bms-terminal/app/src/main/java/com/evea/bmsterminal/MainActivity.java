@@ -6,6 +6,10 @@ import android.app.AlertDialog;
 import android.bluetooth.*;
 import android.bluetooth.le.*;
 import android.content.pm.PackageManager;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.graphics.Color;
 import android.os.*;
 import android.view.*;
@@ -44,6 +48,85 @@ public class MainActivity extends Activity {
     private boolean closeAfterBd=false;
     private int reconnectAttempt=0;
     private boolean authFailure=false;
+    private boolean bondInProgress=false;
+    private boolean bondFailed=false;
+    private boolean servicesRequested=false;
+    private boolean bondReceiverRegistered=false;
+    private Runnable discoveryTask=null;
+    private Runnable bondingTimeoutTask=null;
+
+    private final BroadcastReceiver bondReceiver=new BroadcastReceiver(){
+        @Override public void onReceive(Context context,Intent intent){
+            if(!BluetoothDevice.ACTION_BOND_STATE_CHANGED.equals(intent.getAction()))return;
+            BluetoothDevice d=intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+            if(d==null || currentDevice==null || !d.getAddress().equals(currentDevice.getAddress()))return;
+            int state=intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE,BluetoothDevice.ERROR);
+            int previous=intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE,BluetoothDevice.ERROR);
+            trace("Association : "+previous+" → "+state);
+            if(gatt==null)return;
+            if(state==BluetoothDevice.BOND_BONDING){
+                bondInProgress=true;
+                cancelDiscovery();
+                setStatus("Association Bluetooth en cours…",true);
+                scheduleBondingTimeout(gatt);
+            }else if(state==BluetoothDevice.BOND_BONDED){
+                bondInProgress=false;
+                cancelBondingTimeout();
+                setStatus("Associé — stabilisation BLE…",true);
+                scheduleDiscovery(gatt,1600);
+            }else if(state==BluetoothDevice.BOND_NONE && (previous==BluetoothDevice.BOND_BONDING || bondInProgress)){
+                bondInProgress=false;
+                bondFailed=true;
+                authFailure=true;
+                cancelDiscovery();
+                cancelBondingTimeout();
+                setStatus("Association refusée ou annulée",false);
+                trace("ÉCHEC association : abandon de cette tentative, sans reconnexion automatique");
+                if(gatt!=null){try{gatt.disconnect();}catch(Exception ignored){}}
+            }
+        }
+    };
+
+    private void cancelDiscovery(){
+        if(discoveryTask!=null){handler.removeCallbacks(discoveryTask);discoveryTask=null;}
+    }
+    private void cancelBondingTimeout(){
+        if(bondingTimeoutTask!=null){handler.removeCallbacks(bondingTimeoutTask);bondingTimeoutTask=null;}
+    }
+    private void scheduleBondingTimeout(BluetoothGatt active){
+        cancelBondingTimeout();
+        bondingTimeoutTask=()->{
+            if(active==gatt && bondInProgress && !sessionReady){
+                bondFailed=true;authFailure=true;
+                trace("Association toujours en cours après 30 s : abandon sans nouvelle tentative");
+                setStatus("Délai d'association dépassé",false);
+                try{active.disconnect();}catch(Exception ignored){}
+            }
+        };
+        handler.postDelayed(bondingTimeoutTask,30000);
+    }
+    private void scheduleDiscovery(BluetoothGatt active,long delay){
+        cancelDiscovery();
+        if(active==null || servicesRequested || bondFailed)return;
+        discoveryTask=()->{
+            discoveryTask=null;
+            if(active!=gatt || !connected || servicesRequested || bondFailed)return;
+            if(bondInProgress || bondState(currentDevice).equals("BONDING")){
+                trace("Découverte différée : association encore en cours");
+                return;
+            }
+            servicesRequested=true;
+            trace("Début découverte services : bond="+bondState(currentDevice));
+            setStatus("Découverte des services…",true);
+            try{
+                if(!active.discoverServices()){
+                    servicesRequested=false;
+                    setStatus("Échec découverte des services",false);
+                }
+            }catch(Exception ex){servicesRequested=false;setStatus("Erreur découverte des services",false);}
+        };
+        handler.postDelayed(discoveryTask,delay);
+    }
 
     private final Handler handler=new Handler(Looper.getMainLooper());
     private final StringBuilder rxBuffer=new StringBuilder();
@@ -78,7 +161,10 @@ public class MainActivity extends Activity {
     @Override public void onCreate(Bundle b){
         super.onCreate(b);
         buildUi();
-
+        IntentFilter bondFilter=new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
+        if(Build.VERSION.SDK_INT>=33)registerReceiver(bondReceiver,bondFilter,Context.RECEIVER_EXPORTED);
+        else registerReceiver(bondReceiver,bondFilter);
+        bondReceiverRegistered=true;
 
         BluetoothManager m=(BluetoothManager)getSystemService(BLUETOOTH_SERVICE);
         adapter=m==null?null:m.getAdapter();
@@ -297,6 +383,11 @@ public class MainActivity extends Activity {
         rxBuffer.setLength(0);
         append("\n[APP] Préparation de la connexion…\n");
         authFailure=false;
+        bondInProgress=false;
+        bondFailed=false;
+        servicesRequested=false;
+        cancelDiscovery();
+        cancelBondingTimeout();
         trace("Connexion demandée : bond = "+bondState(d));
         setStatus("Connexion…",true);
 
@@ -317,6 +408,7 @@ public class MainActivity extends Activity {
         setStatus(reconnectAttempt>0?"Reconnexion…":"Connexion…",true);
         append(reconnectAttempt>0?"[APP] Nouvelle tentative de connexion GATT…\n":"[APP] Connexion GATT…\n");
         trace("connectGatt, tentative "+(reconnectAttempt+1)+", bond = "+bondState(d));
+        servicesRequested=false;
         try{
             gatt=d.connectGatt(this,false,gattCb,BluetoothDevice.TRANSPORT_LE);
             if(gatt==null)setStatus("Connexion impossible",false);
@@ -340,12 +432,20 @@ public class MainActivity extends Activity {
                     setStatus("Connecté — découverte des services…",true);
                     append("[APP] Connecté\n");
                 });
-                handler.postDelayed(()->{
-                    if(g==gatt && connected){
-                        try{if(!g.discoverServices())runOnUiThread(()->setStatus("Échec découverte des services",false));}
-                        catch(Exception e){runOnUiThread(()->setStatus("Erreur découverte des services",false));}
+                handler.post(()->{
+                    if(g!=gatt || !connected)return;
+                    String state=bondState(currentDevice);
+                    trace("Connexion établie : bond="+state+", attente avant découverte");
+                    if(state.equals("BONDING")){
+                        bondInProgress=true;
+                        setStatus("Association Bluetooth en cours…",true);
+                        scheduleBondingTimeout(g);
+                    }else{
+                        // Laisser à Android le temps de démarrer une éventuelle
+                        // réassociation avant toute opération GATT supplémentaire.
+                        scheduleDiscovery(g,state.equals("BONDED")?1600:1800);
                     }
-                },250);
+                });
                 return;
             }
 
@@ -358,27 +458,25 @@ public class MainActivity extends Activity {
                 writeInProgress=false;
                 currentWrite=null;
 
-                BluetoothDevice retryDevice=currentDevice;
-                // Éviter une seconde association automatique pendant un échec de sécurité.
-                boolean retry=!manualDisconnect && !authFailure && st!=5 && st!=15 && retryDevice!=null && reconnectAttempt<1 && bondState(retryDevice).equals("NONE");
+                // Ne jamais relancer automatiquement une association qui a échoué.
+                // L’utilisateur peut réessayer depuis l’écran Connexion.
+                boolean wasBondFailure=bondFailed || bondInProgress || authFailure;
+                handler.post(()->{cancelDiscovery();cancelBondingTimeout();});
 
                 try{g.close();}catch(Exception ignored){}
                 if(g==gatt)gatt=null;
 
-                if(retry){
-                    reconnectAttempt++;
-                    runOnUiThread(()->{
-                        setStatus("Connexion interrompue — nouvelle tentative…",true);
-                        append("[APP] Connexion interrompue, nouvelle tentative automatique\n");
-                    });
-                    handler.postDelayed(()->connectGattNow(retryDevice),700);
-                }else{
-                    runOnUiThread(()->{
-                        disconnectBtn.setEnabled(false);
-                        setStatus("Déconnecté",false);
-                        append("[APP] Déconnecté\n");
-                    });
-                }
+                runOnUiThread(()->{
+                    disconnectBtn.setEnabled(false);
+                    if(wasBondFailure){
+                        setStatus("Association Bluetooth échouée",false);
+                        trace("GATT interrompu après échec d'association ; statut="+st);
+                    }else{
+                        setStatus("Déconnecté (GATT "+st+")",false);
+                        trace("GATT déconnecté ; statut="+st+" ; aucune reconnexion automatique");
+                    }
+                    append("[APP] Déconnecté\n");
+                });
             }
         }
 
@@ -645,6 +743,10 @@ public class MainActivity extends Activity {
 
     private void closeGattNow(boolean showDisconnected){
         stopKeepAlive();
+        cancelDiscovery();
+        cancelBondingTimeout();
+        bondInProgress=false;
+        servicesRequested=false;
         handler.removeCallbacks(forceDisconnectTask);
         closeAfterBd=false;
         sessionReady=false;
@@ -670,6 +772,7 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy(){
+        if(bondReceiverRegistered){unregisterReceiver(bondReceiver);bondReceiverRegistered=false;}
         handler.removeCallbacksAndMessages(null);
         stopScan();
         closeGattNow(false);
