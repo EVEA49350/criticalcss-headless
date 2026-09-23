@@ -11,6 +11,10 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.Color;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.RectF;
+import android.graphics.Typeface;
 import android.os.*;
 import android.view.*;
 import android.widget.*;
@@ -177,6 +181,11 @@ public class MainActivity extends Activity {
     private static final int FOREGROUND=Color.WHITE, MUTED=Color.rgb(170,184,194), GREEN=Color.rgb(74,196,120);
     private LinearLayout connectionPanel,debugPanel;
     private TextView screenTitle,connectionLog;
+    private LinearLayout systemPanel,systemErrorCard;
+    private TextView systemState,systemDevice,systemRepeat,systemErrorName;
+    private SocGauge socGauge;
+    private int socValue=-1;
+    private int masterStateValue=-1;
     private final StringBuilder diagnostics=new StringBuilder();
     private int activeScreen=0;
     private int dp(int v){return Math.round(v*getResources().getDisplayMetrics().density);}
@@ -190,6 +199,124 @@ public class MainActivity extends Activity {
     }
     private TextView text(String label,int size,int color){
         TextView t=new TextView(this);t.setText(label);t.setTextSize(size);t.setTextColor(color);return t;
+    }
+    private final class SocGauge extends View {
+        private final Paint p=new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final RectF arc=new RectF();
+        SocGauge(){super(MainActivity.this);setLayerType(View.LAYER_TYPE_SOFTWARE,null);}
+        @Override protected void onMeasure(int widthSpec,int heightSpec){
+            int width=MeasureSpec.getSize(widthSpec);
+            int height=Math.min(dp(270),Math.max(dp(190),width*3/4));
+            setMeasuredDimension(width,height);
+        }
+        @Override protected void onDraw(Canvas c){
+            super.onDraw(c);
+            float w=getWidth(),h=getHeight(),cx=w/2f,cy=h*0.68f;
+            float r=Math.min(w*0.38f,h*0.53f);
+            float sw=Math.max(dp(13),r*0.125f);
+            arc.set(cx-r,cy-r,cx+r,cy+r);
+            p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(sw);p.setStrokeCap(Paint.Cap.ROUND);
+            p.setColor(Color.rgb(57,65,73));c.drawArc(arc,150,240,false,p);
+            int level=Math.max(0,Math.min(100,socValue));
+            int accent=level<=15?Color.rgb(237,111,92):level<=30?Color.rgb(231,171,78):GREEN;
+            if(socValue>=0){p.setColor(accent);c.drawArc(arc,150,240f*level/100f,false,p);}
+            // Aiguille : 150° à gauche (0 %) vers 390° à droite (100 %).
+            if(socValue>=0){
+                double angle=Math.toRadians(150+240.0*level/100.0);
+                float nx=cx+(float)Math.cos(angle)*r*0.80f;
+                float ny=cy+(float)Math.sin(angle)*r*0.80f;
+                p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(dp(3));p.setColor(FOREGROUND);
+                c.drawLine(cx,cy,nx,ny,p);
+                p.setStyle(Paint.Style.FILL);c.drawCircle(cx,cy,dp(6),p);
+            }
+            p.setStyle(Paint.Style.FILL);p.setTypeface(Typeface.create("sans-serif-medium",Typeface.BOLD));
+            p.setTextAlign(Paint.Align.CENTER);p.setColor(FOREGROUND);p.setTextSize(dp(43));
+            c.drawText(socValue>=0?socValue+" %":"—",cx,cy-r*0.28f,p);
+            p.setTypeface(Typeface.DEFAULT);p.setTextSize(dp(13));p.setColor(MUTED);
+            c.drawText("ÉTAT DE CHARGE",cx,cy-r*0.06f,p);
+            p.setTextSize(dp(12));c.drawText("0",cx-r*1.03f,cy+r*0.65f,p);
+            c.drawText("100",cx+r*1.03f,cy+r*0.65f,p);
+        }
+    }
+    private TextView systemLabel(String label){
+        TextView t=text(label,12,MUTED);t.setTypeface(null,Typeface.BOLD);
+        t.setPadding(0,0,0,dp(9));return t;
+    }
+    private void buildSystemUi(){
+        systemPanel=new LinearLayout(this);systemPanel.setOrientation(1);
+        systemPanel.setVisibility(View.GONE);
+        ScrollView scroll=new ScrollView(this);scroll.setFillViewport(false);
+        LinearLayout body=new LinearLayout(this);body.setOrientation(1);
+        socGauge=new SocGauge();
+        LinearLayout gaugeCard=new LinearLayout(this);gaugeCard.setOrientation(1);
+        gaugeCard.setPadding(dp(10),dp(8),dp(10),dp(8));gaugeCard.setBackground(background(PANEL,BORDER,14));
+        gaugeCard.addView(socGauge,new LinearLayout.LayoutParams(-1,dp(235)));
+        LinearLayout.LayoutParams cardLp=new LinearLayout.LayoutParams(-1,-2);cardLp.bottomMargin=dp(12);
+        body.addView(gaugeCard,cardLp);
+        LinearLayout stateCard=new LinearLayout(this);stateCard.setOrientation(1);
+        stateCard.setPadding(dp(18),dp(16),dp(18),dp(18));stateCard.setBackground(background(PANEL,BORDER,14));
+        stateCard.addView(systemLabel("ÉTAT DU MASTER"));
+        systemState=text("En attente des données",22,FOREGROUND);
+        systemState.setTypeface(null,Typeface.BOLD);stateCard.addView(systemState);
+        LinearLayout.LayoutParams stateLp=new LinearLayout.LayoutParams(-1,-2);stateLp.bottomMargin=dp(12);
+        body.addView(stateCard,stateLp);
+        systemErrorCard=new LinearLayout(this);systemErrorCard.setOrientation(1);
+        systemErrorCard.setPadding(dp(18),dp(16),dp(18),dp(18));
+        systemErrorCard.setBackground(background(Color.rgb(53,29,31),Color.rgb(182,77,72),14));
+        systemErrorCard.addView(systemLabel("DÉFAUT ACTIF"));
+        systemErrorName=text("Détails indisponibles",17,Color.rgb(255,210,207));
+        systemErrorName.setTypeface(null,Typeface.BOLD);
+        systemErrorCard.addView(systemErrorName);
+        systemDevice=text("",14,FOREGROUND);systemDevice.setPadding(0,dp(12),0,0);
+        systemErrorCard.addView(systemDevice);
+        systemRepeat=text("",14,FOREGROUND);systemRepeat.setPadding(0,dp(5),0,0);
+        systemErrorCard.addView(systemRepeat);
+        systemErrorCard.setVisibility(View.GONE);
+        body.addView(systemErrorCard,new LinearLayout.LayoutParams(-1,-2));
+        scroll.addView(body);systemPanel.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
+        updateSystemUi();
+    }
+    // Correspondance des états numériques du Master dans le protocole D1.
+    private String masterStateName(int state){
+        String[] names={"Initialisation","Réveil des slaves","Attente démarrage","Scan du bus",
+            "Interrogation du bus","Attente ID","Scan ID par défaut","Interrogation ID par défaut",
+            "Attribution ID","Scan nouvel ID","Interrogation nouvel ID","Enregistrement ID",
+            "Configuration terminée","Erreur","Veille","Réveil","Contrôle d'isolement",
+            "Capteurs de courant","Précharge","Attente","Charge","Bus actif","Réinitialisation"};
+        return state>=0&&state<names.length?names[state]:"État "+state;
+    }
+    private void updateSystemUi(){
+        if(socGauge!=null)socGauge.invalidate();
+        if(systemState==null)return;
+        boolean error=masterStateValue==13;
+        systemState.setText(masterStateValue<0?"En attente des données":masterStateName(masterStateValue));
+        systemState.setTextColor(error?Color.rgb(248,121,112):
+            masterStateValue==14?MUTED:GREEN);
+        if(systemErrorCard!=null)systemErrorCard.setVisibility(error?View.VISIBLE:View.GONE);
+    }
+    private void applyD1(int state,int warning,int soc){
+        masterStateValue=state;socValue=Math.max(0,Math.min(100,soc));
+        updateSystemUi();
+    }
+    private void updateError(String device,String count,String detail){
+        if(systemErrorName!=null)systemErrorName.setText(detail.isEmpty()?"Détails non transmis":detail);
+        if(systemDevice!=null)systemDevice.setText(device.isEmpty()?"":"Origine : "+device);
+        if(systemRepeat!=null)systemRepeat.setText(count.isEmpty()?"":"Répétitions : "+count);
+    }
+    private void parseDiagnosticText(String line){
+        // Compatibilité avec d'éventuelles lignes texte émises par le Master.
+        java.util.regex.Matcher m=java.util.regex.Pattern.compile("DEVICE STATE\\s*:\\s*MASTER_([A-Z_]+)",java.util.regex.Pattern.CASE_INSENSITIVE).matcher(line);
+        if(m.find()){
+            String state=m.group(1).toUpperCase(Locale.ROOT);
+            if(state.equals("SLEEP"))masterStateValue=14;
+            else if(state.equals("ERROR"))masterStateValue=13;
+            else if(state.equals("WAKE_UP"))masterStateValue=15;
+            updateSystemUi();
+        }
+        m=java.util.regex.Pattern.compile("BATTERY SOC VALUE\\s*:\\s*(\\d+)",java.util.regex.Pattern.CASE_INSENSITIVE).matcher(line);
+        if(m.find()){socValue=Math.max(0,Math.min(100,Integer.parseInt(m.group(1))));updateSystemUi();}
+        m=java.util.regex.Pattern.compile("Active Error\\s*[-:]\\s*Device\\s*:\\s*(.*?)\\s*\\|\\s*Repeat\\s*:\\s*(\\d+)\\s*\\|\\s*(.+)",java.util.regex.Pattern.CASE_INSENSITIVE).matcher(line);
+        if(m.find())updateError(m.group(1).trim(),m.group(2).trim(),m.group(3).trim());
     }
     private void buildUi(){
         getWindow().setStatusBarColor(BACKGROUND);getWindow().setNavigationBarColor(BACKGROUND);
@@ -271,7 +398,10 @@ public class MainActivity extends Activity {
             String c=command.getText().toString().trim();if(!c.isEmpty()){send(c);command.setText("");}
         });
         cmdBar.addView(sendBtn,new LinearLayout.LayoutParams(dp(100),dp(45)));debugPanel.addView(cmdBar);
-        root.addView(debugPanel,new LinearLayout.LayoutParams(-1,0,1));setContentView(root);
+        root.addView(debugPanel,new LinearLayout.LayoutParams(-1,0,1));
+        buildSystemUi();
+        root.addView(systemPanel,new LinearLayout.LayoutParams(-1,0,1));
+        setContentView(root);
     }
     private void showNavigationMenu(){
         android.app.Dialog dialog=new android.app.Dialog(this);
@@ -284,7 +414,7 @@ public class MainActivity extends Activity {
             LinearLayout line=new LinearLayout(this);line.setGravity(Gravity.CENTER_VERTICAL);
             line.setPadding(dp(12),0,dp(12),0);
             line.setBackground(background(selected?Color.rgb(40,57,49):PANEL,selected?GREEN:BORDER,8));
-            TextView name=text(i==0?"⌁  Connexion":"▣  Debug "+i,16,FOREGROUND);
+            TextView name=text(i==0?"⌁  Connexion":i==1?"▣  État système":"▣  Debug "+i,16,FOREGROUND);
             line.addView(name,new LinearLayout.LayoutParams(0,dp(54),1));
             if(selected)line.addView(text("✓",21,GREEN));
             LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,dp(54));lp.bottomMargin=dp(5);
@@ -303,9 +433,11 @@ public class MainActivity extends Activity {
     private void selectScreen(int screen){
         if(screen==activeScreen)return;
         terminal.setText("");rxBuffer.setLength(0);activeScreen=screen;
-        boolean connection=screen==0;screenTitle.setText(connection?"Connexion":"Debug "+screen);
+        boolean connection=screen==0;boolean system=screen==1;
+        screenTitle.setText(connection?"Connexion":system?"État système":"Debug "+screen);
         connectionPanel.setVisibility(connection?View.VISIBLE:View.GONE);
-        debugPanel.setVisibility(connection?View.GONE:View.VISIBLE);
+        debugPanel.setVisibility(connection||system?View.GONE:View.VISIBLE);
+        systemPanel.setVisibility(system?View.VISIBLE:View.GONE);
         if(connection){if(sessionReady)enqueueCommandOnMain("D0",false,false);}
         else if(sessionReady)enqueueCommandOnMain("D"+screen,false,false);
         else Toast.makeText(this,"Connecte d'abord le BMS depuis Connexion",Toast.LENGTH_SHORT).show();
@@ -567,8 +699,11 @@ public class MainActivity extends Activity {
             switch(s_type){
                 case "D1":
                     if(as_fields.length!=4) throw new IllegalArgumentException();
-                    append(String.format(Locale.FRANCE,"[D1] Etat Master : %d | Warning : %d | SOC : %d %%\n",
-                        Integer.parseInt(as_fields[1]),Integer.parseInt(as_fields[2]),Integer.parseInt(as_fields[3])));
+                    int state=Integer.parseInt(as_fields[1]);
+                    int warning=Integer.parseInt(as_fields[2]);
+                    int soc=Integer.parseInt(as_fields[3]);
+                    applyD1(state,warning,soc);
+                    append(String.format(Locale.FRANCE,"[D1] Etat Master : %d | Warning : %d | SOC : %d %%\n",state,warning,soc));
                     return;
 
                 case "D2":
@@ -637,6 +772,7 @@ public class MainActivity extends Activity {
                     return;
 
                 default:
+                    parseDiagnosticText(s_line);
                     append(s_line+"\n");
             }
         }catch(Exception e){
